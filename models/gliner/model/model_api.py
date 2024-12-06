@@ -9,7 +9,6 @@ working_path = '/'.join(os.path.dirname(os.path.realpath(__file__)).split('/')[:
 sys.path.append(dirname(os.path.join(working_path, 'model')))
 sys.path.append(dirname(os.path.join(working_path, 'checkpoint')))
 
-
 from model.tags import cult_tags
 from model.utils import merge_entities
 

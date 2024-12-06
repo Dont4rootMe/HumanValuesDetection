@@ -1,4 +1,6 @@
 import torch
+import torch.nn as nn
+from transformers import AutoModel, AutoTokenizer, PretrainedConfig, PreTrainedModel
 from math import ceil
 import numpy as np
 import os
@@ -8,13 +10,48 @@ import sys
 working_path = '/'.join(os.path.dirname(os.path.realpath(__file__)).split('/')[:-1])
 sys.path.append(dirname(os.path.join(working_path, 'model')))
 
-from value_extractor import TextValueExtractor
-from model.tags import group_names, tags_list, borders
+from model.cult_tags import group_names, tags_list, borders
 
+class HVDConfig(PretrainedConfig):
+    def __init__(self, size=768, max_len=4096, device='cpu', num=112 * 3, **kwargs):
+        super().__init__(**kwargs)
+        self.size = size
+        self.max_len = max_len
+        self.device = device
+        self.num = num
+
+class HVDModel(PreTrainedModel):
+    config_class = HVDConfig
+    def __init__(self, config):
+        super().__init__(config)
+        self.config = config
+        self.size = config.size
+        self.max_len = config.max_len
+        self.num = config.num
+        self.bert = AutoModel.from_pretrained(os.path.join(working_path,'model/bert/bert_transformer'))
+        self.tokenizer = AutoTokenizer.from_pretrained(os.path.join(working_path, 'model/bert/bert_tokenizer'))
+        self.fc1 = nn.Linear(self.size, self.num) # classifier
+        self.att = nn.Linear(self.size, self.num, bias=False) # attention linear layer
+        
+    def forward(self, texts):
+        tokenized = self.tokenizer(texts, return_offsets_mapping=True, 
+                                                                   return_tensors="pt", truncation=True, 
+                                                                   max_length=self.max_len, padding='max_length').to(self.bert.device)
+        input_ids = tokenized['input_ids']
+        attention_mask = tokenized['attention_mask']
+        offset_mapping = tokenized['offset_mapping'] # begins and ends of tokens in text
+        res = self.bert(input_ids, attention_mask)[0] # get token embeddings
+        attention_mask[:,0] = 0 # don't consider [CLS] token but ordinary tokens
+        token_res = (self.fc1(res) * attention_mask.unsqueeze(-1)).permute(0, 2, 1).reshape(len(texts), self.num, self.max_len, 1) 
+        # token logits
+        res = nn.functional.softmax(self.att(res) * attention_mask.unsqueeze(-1) + 1e20 * (attention_mask.unsqueeze(-1) - 1), 
+                                    dim=1).permute(0, 2, 1).reshape(len(texts), self.num, 1, self.max_len) @ token_res 
+        # get text logit by token logits using attention pooling
+        return res.reshape(len(texts), self.num), token_res.permute(0, 2, 1, 3).reshape(len(texts), self.max_len, self.num), offset_mapping
 
 # upload model
-model = torch.load(open("bert_checkpoint.pt", "rb"))
-model.to('cuda')
+model = HVDModel.from_pretrained(os.path.join(working_path, 'model/bert/bert_checkpoint'))
+model.to('cpu')
 model.eval()
 
 def model_api(text: str):
